@@ -90,6 +90,24 @@ async def _info(args: argparse.Namespace) -> int:
     return 0 if supported else 1
 
 
+async def _status(args: argparse.Namespace) -> int:
+    async with Shower(args.address) as shower:
+        state = await shower.status()
+    names = {Outlet.FIRST: "1", Outlet.SECOND: "2", Outlet.THIRD: "3"}
+    running = ", ".join(n for bit, n in names.items() if bit & state.outlets)
+    print(f"{'Running:':14}{'yes, outlet ' + running if running else 'no'}")
+    print(f"{'Temperature:':14}{state.temperature}C")
+    # Only meaningful while something is actually running; when idle the
+    # valve reports no target and a resting flow value.
+    if state.is_running:
+        if state.target_temperature is not None:
+            print(f"{'Target:':14}{state.target_temperature}C")
+        print(f"{'Flow:':14}{state.flow}%")
+    if args.verbose:
+        print(f"{'Raw:':14}{state.raw.hex(' ')}")
+    return 0
+
+
 async def _presets(args: argparse.Namespace) -> int:
     async with Shower(args.address) as shower:
         presets = await shower.presets(range(args.first, args.last + 1))
@@ -169,6 +187,12 @@ def _build_parser() -> argparse.ArgumentParser:
     info = subcommands.add_parser("info", help="show valve identification")
     _add_address(info)
     info.set_defaults(handler=_info)
+
+    status = subcommands.add_parser(
+        "status", help="show what the valve is doing right now"
+    )
+    _add_address(status)
+    status.set_defaults(handler=_status)
 
     presets = subcommands.add_parser(
         "presets", help="list stored presets (reads only, runs no water)"

@@ -35,6 +35,7 @@ __all__ = [
     "Preset",
     "ResponseTimeout",
     "Shower",
+    "State",
     "Status",
     "discover",
     "encode_frame",
@@ -60,6 +61,11 @@ _ENVELOPE_SIZE = _HEADER_SIZE + 1
 #: Presets store their name in a fixed-width, NUL-padded ASCII field.
 _NAME_SIZE = 16
 
+#: The state request carries one constant byte, as the vendor app sends.
+_STATE_REQUEST = bytes([0x02])
+#: Smallest reply we can decode every documented state field from.
+_STATE_SIZE = 16
+
 #: Flow is expressed as a percentage of the valve's maximum.
 MAX_FLOW = 100
 
@@ -75,6 +81,7 @@ class Opcode(IntEnum):
     """Message types used by the valve."""
 
     ACK = 0x01
+    GET_STATE = 0x2B
     GET_PRESET = 0x5D
     SET_OUTLETS = 0xAB
     RUN_PRESET = 0xB1
@@ -130,6 +137,32 @@ class Frame:
             f"channel={self.channel} opcode={self.opcode:#04x} "
             f"payload={self.payload.hex(' ')}"
         )
+
+
+@dataclass(frozen=True)
+class State:
+    """What the valve is doing right now.
+
+    Only the fields confirmed against a running valve are broken out;
+    the reply carries more that isn't decoded yet, kept in :attr:`raw`.
+    """
+
+    #: Which outlets are running.
+    outlets: Outlet
+    #: Measured water temperature, in Celsius.
+    temperature: float
+    #: Temperature the valve is aiming for, or None when nothing is
+    #: running and no target is set.
+    target_temperature: float | None
+    #: Flow setting, as the percentage given to :meth:`Shower.set_outlets`.
+    #: Rests at a non-zero default when nothing is running.
+    flow: int
+    #: The undecoded reply payload.
+    raw: bytes
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self.outlets)
 
 
 @dataclass(frozen=True)
@@ -196,6 +229,30 @@ def encode_temperature(celsius: float) -> bytes:
     if not 0 <= tenths <= 0xFFFF:
         raise ValueError(f"temperature out of range: {celsius}")
     return tenths.to_bytes(2, "big")
+
+
+def _decode_state(payload: bytes) -> State | None:
+    """Decode a state reply, or return None if it's too short.
+
+    Field offsets were confirmed by commanding known values and reading
+    them back: a 42.0C target arrived as 01 a4 at 10, a flow of 50 as 32
+    at 12, and the outlet bit at 13, while the temperature at 14 tracked
+    the water warming up.
+    """
+    if len(payload) < _STATE_SIZE:
+        return None
+    target = int.from_bytes(payload[10:12], "big") / 10
+    return State(
+        # Bit 6 additionally means "paused", which isn't decoded here
+        # because it was never observed on the test valve.
+        outlets=Outlet(
+            payload[13] & (Outlet.FIRST | Outlet.SECOND | Outlet.THIRD)
+        ),
+        temperature=int.from_bytes(payload[14:16], "big") / 10,
+        target_temperature=target or None,
+        flow=payload[12],
+        raw=bytes(payload),
+    )
 
 
 def _decode_preset(payload: bytes) -> Preset | None:
@@ -415,6 +472,17 @@ class Shower:
     async def stop(self) -> None:
         """Turn every outlet off, leaving the temperature setting alone."""
         await self.set_outlets(Outlet.NONE, 0.0, 0)
+
+    async def status(self) -> State:
+        """Read what the valve is doing right now.
+
+        This only reads; it doesn't change anything or run any water.
+        """
+        frame = await self._request(Opcode.GET_STATE, _STATE_REQUEST)
+        state = _decode_state(frame.payload)
+        if state is None:
+            raise CommandFailed(f"Could not read the valve's state: {frame}")
+        return state
 
     async def run_preset(self, index: int) -> None:
         """Start a stored preset.

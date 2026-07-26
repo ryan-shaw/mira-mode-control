@@ -85,6 +85,22 @@ $ miramode scan
 Addresses are MAC addresses on Linux and Windows, and opaque UUIDs on
 macOS. Every command below takes one with `-a`.
 
+### Status
+
+To see what the valve is doing right now, without changing anything:
+
+```console
+$ miramode status -a <address>
+Running:      yes, outlet 1
+Temperature:  38.4C
+Target:       41.0C
+Flow:         75%
+```
+
+When nothing is running, only the measured temperature is shown, since
+the valve reports no target and a resting flow value while idle. Add
+`-v` to see the undecoded reply alongside it.
+
 ### Presets
 
 Presets are the programmes stored in the valve — each carries its own
@@ -178,13 +194,29 @@ so a whole valid frame sums to zero modulo 256. Commands are written to
 characteristic `267f0002-…` and replies arrive as notifications on
 `267f0003-…`, one reply per command.
 
-Three opcodes are implemented:
+Four opcodes are implemented:
 
 | Opcode | Meaning | Payload |
 | --- | --- | --- |
 | `0xab` | Set outlets | temperature (2 bytes, tenths of a degree, big endian), flow percentage, outlet bitfield |
 | `0xb1` | Run preset | preset slot |
 | `0x5d` | Read preset | preset slot; the reply echoes the slot then a 16 byte NUL-padded name |
+| `0x2b` | Read state | a constant `0x02`; the reply is described below |
+
+The state reply carries more than is decoded here. These offsets into
+its payload were confirmed by commanding known values and reading them
+back, and everything else is left in `State.raw`:
+
+| Bytes | Meaning |
+| --- | --- |
+| 10-11 | target temperature, tenths of a degree, big endian |
+| 12 | flow percentage |
+| 13 | outlet bitfield, same layout as the one sent to `0xab` |
+| 14-15 | measured water temperature, tenths of a degree, big endian |
+
+Note that replies to `0x2b` use the same `0x01` opcode as an ordinary
+acknowledgement, just with a long payload, so a reply cannot be
+identified by its opcode alone.
 
 The outlet field is a bitfield in a single byte — bit 0 is the first
 outlet, bit 1 the second, bit 2 a third — rather than one byte per
