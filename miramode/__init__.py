@@ -40,6 +40,7 @@ __all__ = [
     "Status",
     "discover",
     "encode_frame",
+    "encode_preset",
 ]
 
 LOG = logging.getLogger(__name__)
@@ -60,7 +61,10 @@ _HEADER_SIZE = 5
 _ENVELOPE_SIZE = _HEADER_SIZE + 1
 
 #: Presets store their name in a fixed-width, NUL-padded ASCII field.
+#: The field is 32 bytes on the wire, but only the first 31 are read
+#: back, so a name is limited to what survives a round trip.
 _NAME_SIZE = 31
+_NAME_FIELD_SIZE = 32
 #: The name field in the shorter reply layout the app also recognises.
 _SHORT_NAME_SIZE = 15
 #: Payload length of the preset reply this decodes in full.
@@ -103,6 +107,7 @@ class Opcode(IntEnum):
     GET_PRESET = 0x5D
     SET_OUTLETS = 0xAB
     RUN_PRESET = 0xB1
+    WRITE_PRESET = 0xDD
 
 
 class Status(IntEnum):
@@ -384,6 +389,66 @@ def _decode_preset(payload: bytes) -> Preset | None:
     )
 
 
+def encode_preset(preset: Preset) -> bytes:
+    """Build the payload that stores ``preset`` in its slot.
+
+    Mirrors the reply layout exactly, which is how it was checked: every
+    preset read off a valve re-encodes to the bytes it arrived as.
+    """
+    if not 0 <= preset.index <= MAX_PRESET:
+        raise ValueError(f"preset slot out of range: {preset.index}")
+    if preset.temperature is None:
+        raise ValueError("a preset needs a temperature")
+    if not preset.outlets:
+        raise ValueError("a preset needs at least one outlet")
+    if (preset.duration is None) == (preset.volume is None):
+        raise ValueError("a preset needs either a duration or a volume")
+
+    name = preset.name.encode("ascii")
+    if len(name) > _NAME_SIZE:
+        raise ValueError(f"name is longer than {_NAME_SIZE} characters")
+
+    tenths = round(preset.temperature * 10)
+    # The top two bits share the flags byte with the outlet bits, so a
+    # temperature needing a third bit would corrupt them.
+    if not 0 <= tenths <= 0x3FF:
+        raise ValueError(f"temperature out of range: {preset.temperature}")
+
+    flow = MAX_FLOW if preset.flow is None else preset.flow
+    if not 0 <= flow <= MAX_FLOW:
+        raise ValueError(f"flow out of range: {flow}")
+
+    duration, volume = preset.duration or 0, preset.volume or 0
+    for label, value in (("duration", duration), ("volume", volume)):
+        if not 0 <= value <= 0xFFFF:
+            raise ValueError(f"{label} out of range: {value}")
+
+    settings = (
+        duration.to_bytes(2, "big")
+        + volume.to_bytes(2, "big")
+        + bytes(
+            (
+                ((int(preset.outlets) & 0b111) << 2) | (tenths >> 8),
+                tenths & 0xFF,
+                flow,
+            )
+        )
+    )
+    payload = (
+        bytes((preset.index,))
+        + name.ljust(_NAME_FIELD_SIZE, b"\x00")
+        + settings
+    )
+    return payload.ljust(_PRESET_REPLY_SIZE, b"\x00")
+
+
+def _encode_empty_preset(index: int) -> bytes:
+    """Build the payload that clears a slot: a bare slot number."""
+    if not 0 <= index <= MAX_PRESET:
+        raise ValueError(f"preset slot out of range: {index}")
+    return bytes((index,)).ljust(_PRESET_REPLY_SIZE, b"\x00")
+
+
 class _FrameReader:
     """Reassembles frames from notification chunks.
 
@@ -634,6 +699,24 @@ class Shower:
         if preset is None or preset.index != index:
             return None
         return preset
+
+    async def write_preset(self, preset: Preset) -> None:
+        """Store a preset, replacing whatever occupies its slot.
+
+        Read one first if you mean to edit rather than replace: this
+        writes every field, so anything left unset is cleared.
+        """
+        self._check_ack(
+            await self._request(Opcode.WRITE_PRESET, encode_preset(preset))
+        )
+
+    async def delete_preset(self, index: int) -> None:
+        """Clear a preset slot."""
+        self._check_ack(
+            await self._request(
+                Opcode.WRITE_PRESET, _encode_empty_preset(index)
+            )
+        )
 
     async def presets(
         self,

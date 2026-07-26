@@ -17,6 +17,7 @@ from . import (
     SERVICE_UUID,
     MiraError,
     Outlet,
+    Preset,
     Shower,
     discover,
 )
@@ -62,6 +63,30 @@ def _preset_index(text: str) -> int:
         raise argparse.ArgumentTypeError(
             f"{text} is not between 0 and {MAX_PRESET}"
         )
+    return value
+
+
+def _duration(text: str) -> int:
+    """Accept a run time as seconds, or as the mm:ss that presets show."""
+    minutes, _, seconds = text.rpartition(":")
+    try:
+        total = int(seconds) + (int(minutes) * 60 if minutes else 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a number of seconds or mm:ss"
+        ) from None
+    if not 0 < total <= 0xFFFF:
+        raise argparse.ArgumentTypeError(f"{text} is out of range")
+    return total
+
+
+def _litres(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not 0 < value <= 0xFFFF:
+        raise argparse.ArgumentTypeError(f"{text} is out of range")
     return value
 
 
@@ -149,7 +174,7 @@ async def _watch(args: argparse.Namespace) -> int:
 
 async def _presets(args: argparse.Namespace) -> int:
     async with Shower(args.address) as shower:
-        presets = await shower.presets(range(args.first, args.last + 1))
+        presets = await shower.presets(range(args.start, args.end + 1))
     if not presets:
         print("No presets configured.")
         return 1
@@ -172,6 +197,54 @@ async def _presets(args: argparse.Namespace) -> int:
         print(
             f"{preset.index:>3}  {preset.name:<{width}}  {'  '.join(details)}"
         )
+    return 0
+
+
+async def _save_preset(args: argparse.Namespace) -> int:
+    outlets = Outlet.NONE
+    if args.first:
+        outlets |= Outlet.FIRST
+    if args.second:
+        outlets |= Outlet.SECOND
+    if not outlets:
+        print(
+            "error: choose an outlet with --first or --second", file=sys.stderr
+        )
+        return 2
+    preset = Preset(
+        index=args.preset,
+        name=args.name,
+        outlets=outlets,
+        temperature=args.temperature,
+        duration=args.duration,
+        volume=args.volume,
+        flow=args.flow,
+    )
+    async with Shower(args.address) as shower:
+        await shower.write_preset(preset)
+        # Read it back rather than trusting the acknowledgement, since
+        # this overwrote whatever was in the slot.
+        stored = await shower.read_preset(args.preset)
+    if stored is None:
+        print(
+            f"warning: slot {args.preset} reads back as empty", file=sys.stderr
+        )
+        return 1
+    print(f"Saved preset {stored.index}: {stored.name}")
+    return 0
+
+
+async def _delete_preset(args: argparse.Namespace) -> int:
+    async with Shower(args.address) as shower:
+        existing = await shower.read_preset(args.preset)
+        if existing is None:
+            print(f"Preset {args.preset} is already empty.")
+            return 0
+        await shower.delete_preset(args.preset)
+        if await shower.read_preset(args.preset) is not None:
+            print(f"error: preset {args.preset} is still set", file=sys.stderr)
+            return 1
+    print(f"Deleted preset {args.preset}: {existing.name}")
     return 0
 
 
@@ -268,18 +341,67 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_address(presets)
     presets.add_argument(
-        "--first",
+        "--start",
         type=_preset_index,
         default=0,
         help="lowest slot to read (default: 0)",
     )
     presets.add_argument(
-        "--last",
+        "--end",
         type=_preset_index,
         default=MAX_PRESET,
         help=f"highest slot to read (default: {MAX_PRESET})",
     )
     presets.set_defaults(handler=_presets)
+
+    save = subcommands.add_parser(
+        "save-preset", help="create or replace a stored preset"
+    )
+    _add_address(save)
+    save.add_argument(
+        "preset", type=_preset_index, help="preset slot to write"
+    )
+    save.add_argument("-n", "--name", required=True, help="preset name")
+    save.add_argument(
+        "-t",
+        "--temperature",
+        type=_temperature,
+        required=True,
+        help="target temperature in Celsius",
+    )
+    extent = save.add_mutually_exclusive_group(required=True)
+    extent.add_argument(
+        "-d",
+        "--duration",
+        type=_duration,
+        help="how long it runs, as seconds or mm:ss",
+    )
+    extent.add_argument(
+        "--volume", type=_litres, help="how much water it delivers, in litres"
+    )
+    save.add_argument(
+        "-1", "--first", action="store_true", help="run the first outlet"
+    )
+    save.add_argument(
+        "-2", "--second", action="store_true", help="run the second outlet"
+    )
+    save.add_argument(
+        "-f",
+        "--flow",
+        type=_percentage,
+        default=MAX_FLOW,
+        help=f"flow as a percentage (default: {MAX_FLOW})",
+    )
+    save.set_defaults(handler=_save_preset)
+
+    delete = subcommands.add_parser(
+        "delete-preset", help="clear a stored preset"
+    )
+    _add_address(delete)
+    delete.add_argument(
+        "preset", type=_preset_index, help="preset slot to clear"
+    )
+    delete.set_defaults(handler=_delete_preset)
 
     start = subcommands.add_parser("start", help="run a stored preset")
     _add_address(start)

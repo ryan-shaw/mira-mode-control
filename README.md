@@ -144,6 +144,28 @@ by number:
 miramode start -a <address> 2
 ```
 
+To create your own, or replace an existing one:
+
+```console
+miramode save-preset -a <address> 3 --name "Evening Bath" \
+    --temperature 40.5 --volume 65 --first --flow 72
+```
+
+A preset either runs for a time or delivers a volume, so give exactly one
+of `--volume` (litres) or `--duration` (seconds, or `mm:ss`). Pick the
+outlets with `--first` and `--second` as for `outlets`. The slot is read
+back afterwards and the stored preset reported, rather than trusting the
+valve's acknowledgement.
+
+`save-preset` writes every field, so it replaces a preset rather than
+amending it — there is no partial update. Slots occupied by the presets
+your valve shipped with are fair game, but they are not recoverable
+afterwards, so note down what `presets` reports before overwriting one.
+
+```console
+miramode delete-preset -a <address> 3
+```
+
 ### Outlets
 
 To run an outlet directly, at a temperature you choose:
@@ -226,6 +248,7 @@ Four opcodes are implemented:
 | `0xb1` | Run preset | preset slot |
 | `0x5d` | Read preset | preset slot; the reply is described below |
 | `0x2b` | Read state | a constant `0x02`; the reply is described below |
+| `0xdd` | Write preset | the same 61 byte layout the read returns |
 | `0x44` | Read name | none; the reply is a 16 byte NUL-padded name |
 | `0x40` | Read serial number | a constant `0x01`; the reply is NUL-padded ASCII digits |
 | `0x41` | Read manufacture date | none; the reply is four packed bytes |
@@ -251,6 +274,14 @@ A preset reply is 61 bytes:
 The outlet bits sit two places higher here than in the bitfield sent to
 `0xab`. An unconfigured slot answers with zeroes where the name belongs,
 and an invalid one echoes the wrong slot number.
+
+Writing a preset sends that same layout back, so every preset read off a
+valve re-encodes to the bytes it arrived as — which is how the encoding
+was checked. Clearing a slot writes just the slot number and zeroes.
+Note the name field is 32 bytes on the wire but only its first 31 are
+read back, so names are limited to 31 characters. The valve stores
+temperature to a tenth of a degree, though the vendor app rounds it to
+whole degrees.
 
 The state reply carries more than is decoded here. These offsets into
 its payload were confirmed by commanding known values and reading them
