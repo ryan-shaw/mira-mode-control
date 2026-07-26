@@ -124,14 +124,18 @@ runs no water:
 
 ```console
 $ miramode presets -a <address>
-  1  Default           38.0C  outlet 2  30:00
-  2  Default Bathfill  42.0C  outlet 1  50 litres
+  1  Default           38.0C  outlet 2      30:00  flow 88%
+  2  Default Bathfill  42.0C  outlet 1  50 litres  flow 88%
 ```
 
 A preset either runs for a time or delivers a volume, so each shows one
 or the other. This is also the easiest way to find out which outlet
 feeds which fixture on your unit: above, the bath fill runs outlet 1, so
 outlet 2 is the shower.
+
+Flow is on the same 0 to 100 scale that `outlets --flow` takes. The
+vendor app shows a quarter of this, on a 0 to 25 scale, so a preset
+reading 88% here appears as 22 in the app.
 
 Factory-fitted presets are numbered from 1; slot 0 is not used. Start one
 by number:

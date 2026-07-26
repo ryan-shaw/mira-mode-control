@@ -202,7 +202,8 @@ class Preset:
     duration: int | None = None
     #: How much water it delivers, in litres.
     volume: int | None = None
-    #: Flow, on the same scale as :meth:`Shower.set_outlets`.
+    #: Flow, on the same 0-100 scale as :meth:`Shower.set_outlets`. The
+    #: vendor app shows a quarter of this, on a 0-25 scale.
     flow: int | None = None
     #: The undecoded reply payload.
     raw: bytes = b""

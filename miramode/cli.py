@@ -160,12 +160,15 @@ async def _presets(args: argparse.Namespace) -> int:
             details.append(f"{preset.temperature:.1f}C")
         if preset.outlets:
             details.append(f"outlet {_outlet_names(preset.outlets)}")
+        # A preset sets one or the other, so this stays one column wide.
         if preset.duration is not None:
             details.append(
-                f"{preset.duration // 60}:{preset.duration % 60:02d}"
+                f"{preset.duration // 60}:{preset.duration % 60:02d}".rjust(9)
             )
-        if preset.volume is not None:
-            details.append(f"{preset.volume} litres")
+        elif preset.volume is not None:
+            details.append(f"{preset.volume} litres".rjust(9))
+        if preset.flow is not None:
+            details.append(f"flow {preset.flow}%")
         print(
             f"{preset.index:>3}  {preset.name:<{width}}  {'  '.join(details)}"
         )
