@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import IntEnum, IntFlag
 
 from bleak import BleakClient, BleakScanner
@@ -66,6 +67,16 @@ _STATE_REQUEST = bytes([0x02])
 #: Smallest reply we can decode every documented state field from.
 _STATE_SIZE = 16
 
+#: The serial number request carries one constant byte.
+_SERIAL_REQUEST = bytes([0x01])
+#: Serial numbers come back as NUL-padded ASCII digits.
+_SERIAL_SIZE = 18
+#: Bytes in the packed manufacturing timestamp.
+_MANUFACTURED_SIZE = 4
+
+#: How often :meth:`Shower.watch` re-reads the valve, in seconds.
+DEFAULT_WATCH_INTERVAL = 2.0
+
 #: Flow is expressed as a percentage of the valve's maximum.
 MAX_FLOW = 100
 
@@ -82,6 +93,9 @@ class Opcode(IntEnum):
 
     ACK = 0x01
     GET_STATE = 0x2B
+    GET_SERIAL = 0x40
+    GET_MANUFACTURED = 0x41
+    GET_NAME = 0x44
     GET_PRESET = 0x5D
     SET_OUTLETS = 0xAB
     RUN_PRESET = 0xB1
@@ -178,11 +192,22 @@ class Preset:
 
 @dataclass(frozen=True)
 class DeviceInfo:
-    """Identifying strings read from the standard GATT characteristics."""
+    """How the valve identifies itself.
 
+    Most valves answer these over the protocol rather than through the
+    standard GATT device-information service, which they don't
+    implement, so any field may be None.
+    """
+
+    #: The valve's own name, usually where it is installed.
     name: str | None
+    #: From the standard GATT characteristics, where they exist at all.
     manufacturer: str | None
     model: str | None
+    #: Serial number, as printed on the unit.
+    serial_number: str | None = None
+    #: When the unit was manufactured.
+    manufactured: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -255,20 +280,64 @@ def _decode_state(payload: bytes) -> State | None:
     )
 
 
+def _differs(state: State, other: State) -> bool:
+    """Whether two readings differ in any field we actually decode."""
+    return (
+        state.outlets,
+        state.temperature,
+        state.target_temperature,
+        state.flow,
+    ) != (
+        other.outlets,
+        other.temperature,
+        other.target_temperature,
+        other.flow,
+    )
+
+
+def _decode_text(raw: bytes) -> str | None:
+    """Decode a NUL-padded ASCII field, or None if it isn't one.
+
+    Unset fields come back as arbitrary bytes rather than empty, so
+    anything that isn't printable ASCII with NUL padding is rejected.
+    """
+    if any(byte and not 0x20 <= byte < 0x7F for byte in raw):
+        return None
+    return raw.split(b"\x00", 1)[0].decode("ascii").strip() or None
+
+
+def _decode_manufactured(payload: bytes) -> datetime | None:
+    """Decode the packed manufacturing timestamp, or None if implausible.
+
+    Four bytes: years since 2000, the day, then a nibble holding the
+    month followed by twelve bits of minutes past midnight. The month
+    has to be the nibble rather than the day, since a day needs five
+    bits. Cross-checks against the serial number, which embeds the same
+    digits.
+    """
+    if len(payload) < _MANUFACTURED_SIZE:
+        return None
+    year, day = 2000 + payload[0], payload[1]
+    month = payload[2] >> 4
+    minutes = ((payload[2] & 0x0F) << 8) | payload[3]
+    if not (1 <= month <= 12 and 1 <= day <= 31 and minutes < 24 * 60):
+        return None
+    try:
+        return datetime(year, month, day, minutes // 60, minutes % 60)
+    except ValueError:
+        return None
+
+
 def _decode_preset(payload: bytes) -> Preset | None:
     """Decode a preset slot, or return None if the slot isn't in use.
 
     An unconfigured slot answers with a mismatched index and arbitrary
-    bytes where the name belongs, so the name field is required to be
-    printable ASCII with NUL padding.
+    bytes where the name belongs.
     """
     if len(payload) < 1 + _NAME_SIZE:
         return None
-    raw_name = payload[1 : 1 + _NAME_SIZE]
-    if any(byte and not 0x20 <= byte < 0x7F for byte in raw_name):
-        return None
-    name = raw_name.split(b"\x00", 1)[0].decode("ascii").strip()
-    if not name:
+    name = _decode_text(payload[1 : 1 + _NAME_SIZE])
+    if name is None:
         return None
     return Preset(
         index=payload[0], name=name, data=bytes(payload[1 + _NAME_SIZE :])
@@ -484,6 +553,31 @@ class Shower:
             raise CommandFailed(f"Could not read the valve's state: {frame}")
         return state
 
+    async def watch(
+        self,
+        interval: float = DEFAULT_WATCH_INTERVAL,
+        *,
+        changes_only: bool = True,
+    ) -> AsyncIterator[State]:
+        """Re-read the valve forever, yielding its state as it changes.
+
+        The first reading is always yielded. After that, ``changes_only``
+        suppresses readings identical to the last one, comparing the
+        decoded fields and ignoring the undecoded remainder, some of
+        which changes on every poll.
+        """
+        previous: State | None = None
+        while True:
+            state = await self.status()
+            if (
+                previous is None
+                or not changes_only
+                or _differs(state, previous)
+            ):
+                yield state
+                previous = state
+            await asyncio.sleep(interval)
+
     async def run_preset(self, index: int) -> None:
         """Start a stored preset.
 
@@ -554,6 +648,27 @@ class Shower:
             read(_MANUFACTURER_CHAR_UUID),
             read(_MODEL_CHAR_UUID),
         )
+
+        # These come over the protocol, and are the only ones this
+        # hardware actually answers - it has no device-information
+        # service at all. Each is optional, so a valve that doesn't
+        # know one of them still reports the rest.
+        async def ask(opcode: int, payload: bytes = b"") -> bytes | None:
+            try:
+                return (await self._request(opcode, payload)).payload
+            except MiraError:
+                LOG.debug("Valve did not answer %#04x", opcode, exc_info=True)
+                return None
+
+        name = await ask(Opcode.GET_NAME)
+        serial = await ask(Opcode.GET_SERIAL, _SERIAL_REQUEST)
+        made = await ask(Opcode.GET_MANUFACTURED)
         return DeviceInfo(
-            name=values[0], manufacturer=values[1], model=values[2]
+            name=_decode_text(name[:_NAME_SIZE]) if name else values[0],
+            serial_number=(
+                _decode_text(serial[:_SERIAL_SIZE]) if serial else None
+            ),
+            manufactured=_decode_manufactured(made) if made else None,
+            manufacturer=values[1],
+            model=values[2],
         )

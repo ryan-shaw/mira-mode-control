@@ -6,10 +6,12 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from collections.abc import Sequence
 
 from . import (
     DEFAULT_SCAN_TIMEOUT,
+    DEFAULT_WATCH_INTERVAL,
     MAX_FLOW,
     MAX_PRESET,
     SERVICE_UUID,
@@ -70,13 +72,20 @@ async def _info(args: argparse.Namespace) -> int:
     async with Shower(args.address) as shower:
         info = await shower.device_info()
         services = shower.services()
+    made = (
+        info.manufactured.strftime("%d %b %Y, %H:%M")
+        if info.manufactured
+        else None
+    )
     for label, value in (
         ("Name", info.name),
+        ("Serial:", info.serial_number),
+        ("Made", made),
         ("Manufacturer", info.manufacturer),
         ("Model", info.model),
     ):
         if value:
-            print(f"{label + ':':14}{value}")
+            print(f"{label.rstrip(':') + ':':14}{value}")
     supported = SERVICE_UUID in services
     print(
         f"{'Protocol:':14}"
@@ -105,6 +114,31 @@ async def _status(args: argparse.Namespace) -> int:
         print(f"{'Flow:':14}{state.flow}%")
     if args.verbose:
         print(f"{'Raw:':14}{state.raw.hex(' ')}")
+    return 0
+
+
+def _describe(state) -> str:
+    names = {Outlet.FIRST: "1", Outlet.SECOND: "2", Outlet.THIRD: "3"}
+    running = ", ".join(n for bit, n in names.items() if bit & state.outlets)
+    if not running:
+        return f"idle           {state.temperature:5.1f}C"
+    target = (
+        f" -> {state.target_temperature:.1f}C"
+        if state.target_temperature is not None
+        else ""
+    )
+    return (
+        f"outlet {running:<7} {state.temperature:5.1f}C{target}"
+        f"  flow {state.flow}%"
+    )
+
+
+async def _watch(args: argparse.Namespace) -> int:
+    async with Shower(args.address) as shower:
+        async for state in shower.watch(args.interval):
+            print(
+                f"{time.strftime('%H:%M:%S')}  {_describe(state)}", flush=True
+            )
     return 0
 
 
@@ -193,6 +227,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_address(status)
     status.set_defaults(handler=_status)
+
+    watch = subcommands.add_parser(
+        "watch", help="follow the valve's state until interrupted"
+    )
+    _add_address(watch)
+    watch.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        default=DEFAULT_WATCH_INTERVAL,
+        help=f"seconds between readings (default: {DEFAULT_WATCH_INTERVAL:g})",
+    )
+    watch.set_defaults(handler=_watch)
 
     presets = subcommands.add_parser(
         "presets", help="list stored presets (reads only, runs no water)"

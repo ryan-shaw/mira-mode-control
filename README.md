@@ -101,6 +101,20 @@ When nothing is running, only the measured temperature is shown, since
 the valve reports no target and a resting flow value while idle. Add
 `-v` to see the undecoded reply alongside it.
 
+To follow it instead of taking a single reading — useful while a bath
+fills — use `watch`, which prints a line whenever the state changes and
+runs until interrupted:
+
+```console
+$ miramode watch -a <address>
+19:18:26  idle            25.5C
+19:18:29  outlet 1        25.5C -> 40.0C  flow 60%
+19:18:36  outlet 1        31.2C -> 40.0C  flow 60%
+19:18:39  idle            25.5C
+```
+
+`--interval` sets how often it re-reads, defaulting to two seconds.
+
 ### Presets
 
 Presets are the programmes stored in the valve — each carries its own
@@ -202,6 +216,15 @@ Four opcodes are implemented:
 | `0xb1` | Run preset | preset slot |
 | `0x5d` | Read preset | preset slot; the reply echoes the slot then a 16 byte NUL-padded name |
 | `0x2b` | Read state | a constant `0x02`; the reply is described below |
+| `0x44` | Read name | none; the reply is a 16 byte NUL-padded name |
+| `0x40` | Read serial number | a constant `0x01`; the reply is NUL-padded ASCII digits |
+| `0x41` | Read manufacture date | none; the reply is four packed bytes |
+
+The manufacture date packs years since 2000, then the day, then a
+nibble holding the month followed by twelve bits of minutes past
+midnight. The month has to be the nibble rather than the day, since a
+day needs five bits — and the serial number embeds the same digits,
+which confirms it.
 
 The state reply carries more than is decoded here. These offsets into
 its payload were confirmed by commanding known values and reading them
