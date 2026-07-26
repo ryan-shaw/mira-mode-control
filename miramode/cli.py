@@ -23,6 +23,13 @@ from . import (
 
 LOG = logging.getLogger(__name__)
 
+_OUTLET_NAMES = {Outlet.FIRST: "1", Outlet.SECOND: "2", Outlet.THIRD: "3"}
+
+
+def _outlet_names(outlets: Outlet) -> str:
+    """Render an outlet bitfield as a human list, e.g. "1, 2"."""
+    return ", ".join(n for bit, n in _OUTLET_NAMES.items() if bit & outlets)
+
 
 def _temperature(text: str) -> float:
     try:
@@ -102,8 +109,7 @@ async def _info(args: argparse.Namespace) -> int:
 async def _status(args: argparse.Namespace) -> int:
     async with Shower(args.address) as shower:
         state = await shower.status()
-    names = {Outlet.FIRST: "1", Outlet.SECOND: "2", Outlet.THIRD: "3"}
-    running = ", ".join(n for bit, n in names.items() if bit & state.outlets)
+    running = _outlet_names(state.outlets)
     print(f"{'Running:':14}{'yes, outlet ' + running if running else 'no'}")
     print(f"{'Temperature:':14}{state.temperature}C")
     # Only meaningful while something is actually running; when idle the
@@ -118,8 +124,7 @@ async def _status(args: argparse.Namespace) -> int:
 
 
 def _describe(state) -> str:
-    names = {Outlet.FIRST: "1", Outlet.SECOND: "2", Outlet.THIRD: "3"}
-    running = ", ".join(n for bit, n in names.items() if bit & state.outlets)
+    running = _outlet_names(state.outlets)
     if not running:
         return f"idle           {state.temperature:5.1f}C"
     target = (
@@ -148,8 +153,22 @@ async def _presets(args: argparse.Namespace) -> int:
     if not presets:
         print("No presets configured.")
         return 1
+    width = max(len(p.name) for p in presets)
     for preset in presets:
-        print(f"{preset.index:>3}  {preset.name}")
+        details = []
+        if preset.temperature is not None:
+            details.append(f"{preset.temperature:.1f}C")
+        if preset.outlets:
+            details.append(f"outlet {_outlet_names(preset.outlets)}")
+        if preset.duration is not None:
+            details.append(
+                f"{preset.duration // 60}:{preset.duration % 60:02d}"
+            )
+        if preset.volume is not None:
+            details.append(f"{preset.volume} litres")
+        print(
+            f"{preset.index:>3}  {preset.name:<{width}}  {'  '.join(details)}"
+        )
     return 0
 
 

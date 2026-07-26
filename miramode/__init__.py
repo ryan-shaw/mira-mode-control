@@ -60,7 +60,11 @@ _HEADER_SIZE = 5
 _ENVELOPE_SIZE = _HEADER_SIZE + 1
 
 #: Presets store their name in a fixed-width, NUL-padded ASCII field.
-_NAME_SIZE = 16
+_NAME_SIZE = 31
+#: The name field in the shorter reply layout the app also recognises.
+_SHORT_NAME_SIZE = 15
+#: Payload length of the preset reply this decodes in full.
+_PRESET_REPLY_SIZE = 61
 
 #: The state request carries one constant byte, as the vendor app sends.
 _STATE_REQUEST = bytes([0x02])
@@ -181,13 +185,27 @@ class State:
 
 @dataclass(frozen=True)
 class Preset:
-    """A stored programme, e.g. a bath fill."""
+    """A stored programme, e.g. a bath fill.
+
+    A preset either runs for a time or delivers a volume: whichever it
+    doesn't use is None. Everything but the name is None for reply
+    layouts this doesn't recognise.
+    """
 
     index: int
     name: str
-    #: The rest of the slot's contents, which hold the target temperature
-    #: and run time in a layout that isn't fully decoded yet.
-    data: bytes
+    #: Which outlets the preset runs.
+    outlets: Outlet = Outlet.NONE
+    #: Target temperature, in Celsius.
+    temperature: float | None = None
+    #: How long it runs, in seconds.
+    duration: int | None = None
+    #: How much water it delivers, in litres.
+    volume: int | None = None
+    #: Flow, on the same scale as :meth:`Shower.set_outlets`.
+    flow: int | None = None
+    #: The undecoded reply payload.
+    raw: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -331,16 +349,37 @@ def _decode_manufactured(payload: bytes) -> datetime | None:
 def _decode_preset(payload: bytes) -> Preset | None:
     """Decode a preset slot, or return None if the slot isn't in use.
 
-    An unconfigured slot answers with a mismatched index and arbitrary
-    bytes where the name belongs.
+    An unconfigured slot answers with a mismatched index, or with zeroes
+    or arbitrary bytes where the name belongs.
+
+    Only the 61 byte layout is decoded in full. The app recognises a
+    shorter one too, which no valve here produces, so for anything else
+    just the name is read and the rest left None rather than guessed at.
     """
-    if len(payload) < 1 + _NAME_SIZE:
+    if len(payload) < 1 + _SHORT_NAME_SIZE:
         return None
-    name = _decode_text(payload[1 : 1 + _NAME_SIZE])
+    long_form = len(payload) == _PRESET_REPLY_SIZE
+    name_size = _NAME_SIZE if long_form else _SHORT_NAME_SIZE
+    name = _decode_text(payload[1 : 1 + name_size])
     if name is None:
         return None
+    if not long_form:
+        return Preset(index=payload[0], name=name, raw=bytes(payload))
+
+    flags = payload[37]
     return Preset(
-        index=payload[0], name=name, data=bytes(payload[1 + _NAME_SIZE :])
+        index=payload[0],
+        name=name,
+        # The outlet bits sit two places higher here than in the
+        # bitfield sent to SET_OUTLETS, which uses bits 0 to 2.
+        outlets=Outlet((flags >> 2) & 0b111),
+        # The low two bits of the flags byte extend the temperature,
+        # which is why it needs masking off before reading the outlets.
+        temperature=(((flags & 0b11) << 8) | payload[38]) / 10,
+        duration=int.from_bytes(payload[33:35], "big") or None,
+        volume=int.from_bytes(payload[35:37], "big") or None,
+        flow=payload[39],
+        raw=bytes(payload),
     )
 
 
@@ -664,7 +703,7 @@ class Shower:
         serial = await ask(Opcode.GET_SERIAL, _SERIAL_REQUEST)
         made = await ask(Opcode.GET_MANUFACTURED)
         return DeviceInfo(
-            name=_decode_text(name[:_NAME_SIZE]) if name else values[0],
+            name=_decode_text(name) if name else values[0],
             serial_number=(
                 _decode_text(serial[:_SERIAL_SIZE]) if serial else None
             ),

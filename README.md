@@ -124,9 +124,14 @@ runs no water:
 
 ```console
 $ miramode presets -a <address>
-  1  Default
-  2  Default Bathfill
+  1  Default           38.0C  outlet 2  30:00
+  2  Default Bathfill  42.0C  outlet 1  50 litres
 ```
+
+A preset either runs for a time or delivers a volume, so each shows one
+or the other. This is also the easiest way to find out which outlet
+feeds which fixture on your unit: above, the bath fill runs outlet 1, so
+outlet 2 is the shower.
 
 Factory-fitted presets are numbered from 1; slot 0 is not used. Start one
 by number:
@@ -148,7 +153,8 @@ at once. A command states the complete desired state, so any outlet you
 don't name is switched off. `--flow` sets the flow rate as a percentage,
 defaulting to 100.
 
-Which physical fixture is "first" depends on how your unit is plumbed.
+Which physical fixture is "first" depends on how your unit is plumbed;
+`presets` will tell you, since each preset reports the outlet it uses.
 
 To shut everything off, including a running preset:
 
@@ -214,7 +220,7 @@ Four opcodes are implemented:
 | --- | --- | --- |
 | `0xab` | Set outlets | temperature (2 bytes, tenths of a degree, big endian), flow percentage, outlet bitfield |
 | `0xb1` | Run preset | preset slot |
-| `0x5d` | Read preset | preset slot; the reply echoes the slot then a 16 byte NUL-padded name |
+| `0x5d` | Read preset | preset slot; the reply is described below |
 | `0x2b` | Read state | a constant `0x02`; the reply is described below |
 | `0x44` | Read name | none; the reply is a 16 byte NUL-padded name |
 | `0x40` | Read serial number | a constant `0x01`; the reply is NUL-padded ASCII digits |
@@ -225,6 +231,22 @@ nibble holding the month followed by twelve bits of minutes past
 midnight. The month has to be the nibble rather than the day, since a
 day needs five bits — and the serial number embeds the same digits,
 which confirms it.
+
+A preset reply is 61 bytes:
+
+| Bytes | Meaning |
+| --- | --- |
+| 0 | the slot, echoed back |
+| 1-31 | name, NUL-padded ASCII |
+| 33-34 | duration in seconds, or zero if the preset delivers a volume |
+| 35-36 | volume in litres, or zero if the preset runs for a time |
+| 37 | outlets in bits 2-4, plus the top two bits of the temperature |
+| 38 | low byte of the temperature, in tenths of a degree |
+| 39 | flow |
+
+The outlet bits sit two places higher here than in the bitfield sent to
+`0xab`. An unconfigured slot answers with zeroes where the name belongs,
+and an invalid one echoes the wrong slot number.
 
 The state reply carries more than is decoded here. These offsets into
 its payload were confirmed by commanding known values and reading them
