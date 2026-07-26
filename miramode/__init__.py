@@ -1,0 +1,479 @@
+"""Control Mira Mode digital showers and bath fillers over Bluetooth LE.
+
+Current-generation Mira Mode / Kohler valves expose a GATT service
+(``SERVICE_UUID``) carrying a simple binary protocol. Commands are written
+to one characteristic and responses arrive as notifications on another,
+one response per command.
+
+Every message is a frame::
+
+    aa 55 <channel> <opcode> <length> <payload...> <checksum>
+
+where the checksum is the two's complement of the sum of all preceding
+bytes, so that the bytes of a whole valid frame sum to zero modulo 256.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from enum import IntEnum, IntFlag
+
+from bleak import BleakClient, BleakScanner
+
+__all__ = [
+    "CommandFailed",
+    "DeviceInfo",
+    "DiscoveredDevice",
+    "Frame",
+    "MiraError",
+    "NotConnected",
+    "Opcode",
+    "Outlet",
+    "Preset",
+    "ResponseTimeout",
+    "Shower",
+    "Status",
+    "discover",
+    "encode_frame",
+]
+
+LOG = logging.getLogger(__name__)
+
+SERVICE_UUID = "267f0001-eb15-43f5-94c3-67d2221188f7"
+COMMAND_CHAR_UUID = "267f0002-eb15-43f5-94c3-67d2221188f7"
+EVENT_CHAR_UUID = "267f0003-eb15-43f5-94c3-67d2221188f7"
+
+_DEVICE_NAME_CHAR_UUID = "00002a00-0000-1000-8000-00805f9b34fb"
+_MODEL_CHAR_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
+_MANUFACTURER_CHAR_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
+
+PREAMBLE = b"\xaa\x55"
+
+#: preamble, channel, opcode and payload length.
+_HEADER_SIZE = 5
+#: header plus the trailing checksum byte.
+_ENVELOPE_SIZE = _HEADER_SIZE + 1
+
+#: Presets store their name in a fixed-width, NUL-padded ASCII field.
+_NAME_SIZE = 16
+
+#: Flow is expressed as a percentage of the valve's maximum.
+MAX_FLOW = 100
+
+#: Highest preset slot the valve will answer for.
+MAX_PRESET = 15
+
+DEFAULT_CONNECT_TIMEOUT = 20.0
+DEFAULT_RESPONSE_TIMEOUT = 5.0
+DEFAULT_SCAN_TIMEOUT = 5.0
+
+
+class Opcode(IntEnum):
+    """Message types used by the valve."""
+
+    ACK = 0x01
+    GET_PRESET = 0x5D
+    SET_OUTLETS = 0xAB
+    RUN_PRESET = 0xB1
+
+
+class Status(IntEnum):
+    """Result byte carried by an :attr:`Opcode.ACK` response."""
+
+    OK = 0x01
+    ERROR = 0x80
+
+
+class Outlet(IntFlag):
+    """Which outlets should be running.
+
+    The valve takes the running outlets as a single bitfield rather than
+    one field per outlet, so a command always states the complete desired
+    state: anything not named here is turned off.
+    """
+
+    NONE = 0
+    FIRST = 1
+    SECOND = 2
+    THIRD = 4
+
+
+class MiraError(Exception):
+    """Base class for errors raised by this package."""
+
+
+class NotConnected(MiraError):
+    """Raised when a command needs a connection that isn't established."""
+
+
+class ResponseTimeout(MiraError):
+    """Raised when the valve doesn't answer a command in time."""
+
+
+class CommandFailed(MiraError):
+    """Raised when the valve explicitly rejects a command."""
+
+
+@dataclass(frozen=True)
+class Frame:
+    """A decoded protocol message."""
+
+    channel: int
+    opcode: int
+    payload: bytes
+
+    def __str__(self) -> str:
+        return (f"channel={self.channel} opcode={self.opcode:#04x} "
+                f"payload={self.payload.hex(' ')}")
+
+
+@dataclass(frozen=True)
+class Preset:
+    """A stored programme, e.g. a bath fill."""
+
+    index: int
+    name: str
+    #: The rest of the slot's contents, which hold the target temperature
+    #: and run time in a layout that isn't fully decoded yet.
+    data: bytes
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    """Identifying strings read from the standard GATT characteristics."""
+
+    name: str | None
+    manufacturer: str | None
+    model: str | None
+
+
+@dataclass(frozen=True)
+class DiscoveredDevice:
+    """A valve seen while scanning."""
+
+    address: str
+    name: str | None
+
+
+def _checksum(data: bytes) -> int:
+    """Return the byte that makes ``data`` sum to zero modulo 256."""
+    return -sum(data) & 0xFF
+
+
+def encode_frame(opcode: int, payload: bytes = b"", channel: int = 0) -> bytes:
+    """Build a complete frame, checksum included."""
+    if not 0 <= channel <= 0xFF:
+        raise ValueError(f"channel out of range: {channel}")
+    if len(payload) > 0xFF:
+        raise ValueError(f"payload too long: {len(payload)} bytes")
+    body = PREAMBLE + bytes((channel, int(opcode), len(payload))) + payload
+    return body + bytes((_checksum(body),))
+
+
+def _decode_frame(raw: bytes) -> Frame | None:
+    """Decode one complete frame, or return None if it doesn't check out."""
+    if len(raw) < _ENVELOPE_SIZE or not raw.startswith(PREAMBLE):
+        return None
+    if len(raw) != _ENVELOPE_SIZE + raw[4]:
+        return None
+    if sum(raw) & 0xFF:
+        return None
+    return Frame(channel=raw[2], opcode=raw[3], payload=raw[_HEADER_SIZE:-1])
+
+
+def encode_temperature(celsius: float) -> bytes:
+    """Encode a temperature as tenths of a degree, big endian.
+
+    Zero is meaningful: the valve reads it as "leave the temperature
+    alone", which is what a plain stop command sends.
+    """
+    tenths = round(celsius * 10)
+    if not 0 <= tenths <= 0xFFFF:
+        raise ValueError(f"temperature out of range: {celsius}")
+    return tenths.to_bytes(2, "big")
+
+
+def _decode_preset(payload: bytes) -> Preset | None:
+    """Decode a preset slot, or return None if the slot isn't in use.
+
+    An unconfigured slot answers with a mismatched index and arbitrary
+    bytes where the name belongs, so the name field is required to be
+    printable ASCII with NUL padding.
+    """
+    if len(payload) < 1 + _NAME_SIZE:
+        return None
+    raw_name = payload[1:1 + _NAME_SIZE]
+    if any(byte and not 0x20 <= byte < 0x7F for byte in raw_name):
+        return None
+    name = raw_name.split(b"\x00", 1)[0].decode("ascii").strip()
+    if not name:
+        return None
+    return Preset(index=payload[0], name=name,
+                  data=bytes(payload[1 + _NAME_SIZE:]))
+
+
+class _FrameReader:
+    """Reassembles frames from notification chunks.
+
+    A response usually arrives in a single notification, but nothing
+    guarantees that, so incoming bytes are buffered and frames are taken
+    out as they complete.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    def reset(self) -> None:
+        self._buffer.clear()
+
+    def feed(self, chunk: bytes) -> list[Frame]:
+        self._buffer += chunk
+        frames: list[Frame] = []
+        while True:
+            start = self._buffer.find(PREAMBLE)
+            if start < 0:
+                # Keep a trailing byte, which may be a split preamble.
+                del self._buffer[:max(0, len(self._buffer) - 1)]
+                break
+            del self._buffer[:start]
+            if len(self._buffer) < _ENVELOPE_SIZE:
+                break
+            size = _ENVELOPE_SIZE + self._buffer[4]
+            if len(self._buffer) < size:
+                break
+            raw = bytes(self._buffer[:size])
+            del self._buffer[:size]
+            frame = _decode_frame(raw)
+            if frame is None:
+                LOG.debug("Discarding malformed frame: %s", raw.hex(" "))
+            else:
+                frames.append(frame)
+        return frames
+
+
+async def discover(
+    timeout: float = DEFAULT_SCAN_TIMEOUT,
+) -> list[DiscoveredDevice]:
+    """Scan for nearby valves.
+
+    Matches on the advertised service UUID, falling back to the name for
+    valves that advertise without it.
+    """
+    found: dict[str, DiscoveredDevice] = {}
+    for device, advertisement in (
+        await BleakScanner.discover(timeout=timeout, return_adv=True)
+    ).values():
+        name = advertisement.local_name or device.name
+        uuids = {uuid.lower() for uuid in advertisement.service_uuids or ()}
+        if SERVICE_UUID in uuids or (name and "mira" in name.lower()):
+            found[device.address] = DiscoveredDevice(device.address, name)
+    return sorted(found.values(), key=lambda d: (d.name or "", d.address))
+
+
+class Shower:
+    """A connection to one valve.
+
+    Usable as an async context manager::
+
+        async with Shower(address) as shower:
+            await shower.run_preset(2)
+    """
+
+    def __init__(
+        self,
+        address: str,
+        *,
+        channel: int = 0,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        response_timeout: float = DEFAULT_RESPONSE_TIMEOUT,
+    ) -> None:
+        self._address = address
+        self._channel = channel
+        self._connect_timeout = connect_timeout
+        self._response_timeout = response_timeout
+        self._client: BleakClient | None = None
+        self._reader = _FrameReader()
+        self._pending: asyncio.Future | None = None
+
+    @property
+    def address(self) -> str:
+        return self._address
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None and self._client.is_connected
+
+    async def __aenter__(self) -> Shower:
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.disconnect()
+
+    async def connect(self) -> None:
+        if self._client is not None:
+            return
+        client = BleakClient(self._address, timeout=self._connect_timeout)
+        await client.connect()
+        try:
+            self._reader.reset()
+            await client.start_notify(EVENT_CHAR_UUID, self._on_notification)
+        except Exception:
+            await client.disconnect()
+            raise
+        self._client = client
+        LOG.debug("Connected to %s", self._address)
+
+    async def disconnect(self) -> None:
+        client, self._client = self._client, None
+        if client is None:
+            return
+        self._fail_pending(NotConnected("Disconnected while awaiting a reply"))
+        try:
+            if client.is_connected:
+                await client.stop_notify(EVENT_CHAR_UUID)
+        except Exception:
+            LOG.debug("Ignoring error while stopping notifications",
+                      exc_info=True)
+        await client.disconnect()
+        LOG.debug("Disconnected from %s", self._address)
+
+    def _require_client(self) -> BleakClient:
+        if self._client is None:
+            raise NotConnected("Not connected; call connect() first")
+        return self._client
+
+    def _fail_pending(self, error: Exception) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None and not pending.done():
+            pending.set_exception(error)
+
+    def _on_notification(self, _characteristic: object,
+                         data: bytearray) -> None:
+        for frame in self._reader.feed(bytes(data)):
+            LOG.debug("Received %s", frame)
+            pending, self._pending = self._pending, None
+            if pending is not None and not pending.done():
+                pending.set_result(frame)
+            else:
+                LOG.debug("Ignoring unsolicited frame")
+
+    async def _request(self, opcode: int, payload: bytes = b"") -> Frame:
+        """Send a command and wait for the valve's reply."""
+        client = self._require_client()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending = future
+        frame = encode_frame(opcode, payload, self._channel)
+        LOG.debug("Sending %s", frame.hex(" "))
+        try:
+            await client.write_gatt_char(COMMAND_CHAR_UUID, frame,
+                                         response=False)
+            return await asyncio.wait_for(future, self._response_timeout)
+        except asyncio.TimeoutError:
+            raise ResponseTimeout(
+                f"No reply to command {opcode:#04x}") from None
+        finally:
+            if self._pending is future:
+                self._pending = None
+
+    @staticmethod
+    def _check_ack(frame: Frame) -> None:
+        status = frame.payload[0] if frame.payload else None
+        if status == Status.OK:
+            return
+        if status == Status.ERROR:
+            raise CommandFailed("The valve rejected the command")
+        raise CommandFailed(f"Unexpected reply: {frame}")
+
+    async def set_outlets(
+        self,
+        outlets: Outlet,
+        temperature: float,
+        flow: int = MAX_FLOW,
+    ) -> None:
+        """Set exactly which outlets run, at a given temperature and flow.
+
+        Outlets absent from ``outlets`` are turned off.
+        """
+        if not 0 <= flow <= MAX_FLOW:
+            raise ValueError(f"flow out of range: {flow}")
+        payload = encode_temperature(temperature) + bytes(
+            (flow if outlets else 0, int(outlets)))
+        self._check_ack(await self._request(Opcode.SET_OUTLETS, payload))
+
+    async def stop(self) -> None:
+        """Turn every outlet off, leaving the temperature setting alone."""
+        await self.set_outlets(Outlet.NONE, 0.0, 0)
+
+    async def run_preset(self, index: int) -> None:
+        """Start a stored preset.
+
+        Factory-fitted presets are numbered from 1.
+        """
+        self._check_ack(
+            await self._request(Opcode.RUN_PRESET, bytes((index,))))
+
+    async def read_preset(self, index: int) -> Preset | None:
+        """Read one preset slot, returning None if it isn't configured."""
+        frame = await self._request(Opcode.GET_PRESET, bytes((index,)))
+        preset = _decode_preset(frame.payload)
+        if preset is None or preset.index != index:
+            return None
+        return preset
+
+    async def presets(
+        self,
+        indexes: Iterable[int] | None = None,
+    ) -> list[Preset]:
+        """Read every configured preset in ``indexes``.
+
+        This only reads from the valve; it doesn't run any water.
+        """
+        if indexes is None:
+            indexes = range(MAX_PRESET + 1)
+        found = []
+        for index in indexes:
+            preset = await self.read_preset(index)
+            if preset is not None:
+                found.append(preset)
+        return found
+
+    def services(self) -> dict[str, list[str]]:
+        """Map each GATT service the valve offers to its characteristics."""
+        client = self._require_client()
+        return {
+            service.uuid.lower():
+                sorted(char.uuid.lower() for char in service.characteristics)
+            for service in client.services
+        }
+
+    async def device_info(self) -> DeviceInfo:
+        """Read whatever identification the valve exposes.
+
+        Not every valve implements the standard device-information
+        characteristics, so any of these fields may be None.
+        """
+        client = self._require_client()
+        available = {uuid for uuids in self.services().values()
+                     for uuid in uuids}
+
+        async def read(uuid: str) -> str | None:
+            if uuid not in available:
+                return None
+            try:
+                value = await client.read_gatt_char(uuid)
+            except Exception:
+                LOG.debug("Could not read %s", uuid, exc_info=True)
+                return None
+            return value.decode("utf-8", "replace").strip() or None
+
+        values: Sequence[str | None] = await asyncio.gather(
+            read(_DEVICE_NAME_CHAR_UUID),
+            read(_MANUFACTURER_CHAR_UUID),
+            read(_MODEL_CHAR_UUID),
+        )
+        return DeviceInfo(name=values[0], manufacturer=values[1],
+                          model=values[2])
