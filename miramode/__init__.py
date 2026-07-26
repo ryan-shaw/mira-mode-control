@@ -126,8 +126,10 @@ class Frame:
     payload: bytes
 
     def __str__(self) -> str:
-        return (f"channel={self.channel} opcode={self.opcode:#04x} "
-                f"payload={self.payload.hex(' ')}")
+        return (
+            f"channel={self.channel} opcode={self.opcode:#04x} "
+            f"payload={self.payload.hex(' ')}"
+        )
 
 
 @dataclass(frozen=True)
@@ -205,14 +207,15 @@ def _decode_preset(payload: bytes) -> Preset | None:
     """
     if len(payload) < 1 + _NAME_SIZE:
         return None
-    raw_name = payload[1:1 + _NAME_SIZE]
+    raw_name = payload[1 : 1 + _NAME_SIZE]
     if any(byte and not 0x20 <= byte < 0x7F for byte in raw_name):
         return None
     name = raw_name.split(b"\x00", 1)[0].decode("ascii").strip()
     if not name:
         return None
-    return Preset(index=payload[0], name=name,
-                  data=bytes(payload[1 + _NAME_SIZE:]))
+    return Preset(
+        index=payload[0], name=name, data=bytes(payload[1 + _NAME_SIZE :])
+    )
 
 
 class _FrameReader:
@@ -236,7 +239,7 @@ class _FrameReader:
             start = self._buffer.find(PREAMBLE)
             if start < 0:
                 # Keep a trailing byte, which may be a split preamble.
-                del self._buffer[:max(0, len(self._buffer) - 1)]
+                del self._buffer[: max(0, len(self._buffer) - 1)]
                 break
             del self._buffer[:start]
             if len(self._buffer) < _ENVELOPE_SIZE:
@@ -336,8 +339,9 @@ class Shower:
             if client.is_connected:
                 await client.stop_notify(EVENT_CHAR_UUID)
         except Exception:
-            LOG.debug("Ignoring error while stopping notifications",
-                      exc_info=True)
+            LOG.debug(
+                "Ignoring error while stopping notifications", exc_info=True
+            )
         await client.disconnect()
         LOG.debug("Disconnected from %s", self._address)
 
@@ -351,8 +355,9 @@ class Shower:
         if pending is not None and not pending.done():
             pending.set_exception(error)
 
-    def _on_notification(self, _characteristic: object,
-                         data: bytearray) -> None:
+    def _on_notification(
+        self, _characteristic: object, data: bytearray
+    ) -> None:
         for frame in self._reader.feed(bytes(data)):
             LOG.debug("Received %s", frame)
             pending, self._pending = self._pending, None
@@ -369,12 +374,14 @@ class Shower:
         frame = encode_frame(opcode, payload, self._channel)
         LOG.debug("Sending %s", frame.hex(" "))
         try:
-            await client.write_gatt_char(COMMAND_CHAR_UUID, frame,
-                                         response=False)
+            await client.write_gatt_char(
+                COMMAND_CHAR_UUID, frame, response=False
+            )
             return await asyncio.wait_for(future, self._response_timeout)
         except asyncio.TimeoutError:
             raise ResponseTimeout(
-                f"No reply to command {opcode:#04x}") from None
+                f"No reply to command {opcode:#04x}"
+            ) from None
         finally:
             if self._pending is future:
                 self._pending = None
@@ -401,7 +408,8 @@ class Shower:
         if not 0 <= flow <= MAX_FLOW:
             raise ValueError(f"flow out of range: {flow}")
         payload = encode_temperature(temperature) + bytes(
-            (flow if outlets else 0, int(outlets)))
+            (flow if outlets else 0, int(outlets))
+        )
         self._check_ack(await self._request(Opcode.SET_OUTLETS, payload))
 
     async def stop(self) -> None:
@@ -414,7 +422,8 @@ class Shower:
         Factory-fitted presets are numbered from 1.
         """
         self._check_ack(
-            await self._request(Opcode.RUN_PRESET, bytes((index,))))
+            await self._request(Opcode.RUN_PRESET, bytes((index,)))
+        )
 
     async def read_preset(self, index: int) -> Preset | None:
         """Read one preset slot, returning None if it isn't configured."""
@@ -445,8 +454,9 @@ class Shower:
         """Map each GATT service the valve offers to its characteristics."""
         client = self._require_client()
         return {
-            service.uuid.lower():
-                sorted(char.uuid.lower() for char in service.characteristics)
+            service.uuid.lower(): sorted(
+                char.uuid.lower() for char in service.characteristics
+            )
             for service in client.services
         }
 
@@ -457,8 +467,9 @@ class Shower:
         characteristics, so any of these fields may be None.
         """
         client = self._require_client()
-        available = {uuid for uuids in self.services().values()
-                     for uuid in uuids}
+        available = {
+            uuid for uuids in self.services().values() for uuid in uuids
+        }
 
         async def read(uuid: str) -> str | None:
             if uuid not in available:
@@ -475,5 +486,6 @@ class Shower:
             read(_MANUFACTURER_CHAR_UUID),
             read(_MODEL_CHAR_UUID),
         )
-        return DeviceInfo(name=values[0], manufacturer=values[1],
-                          model=values[2])
+        return DeviceInfo(
+            name=values[0], manufacturer=values[1], model=values[2]
+        )

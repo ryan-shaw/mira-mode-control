@@ -133,17 +133,19 @@ The API is async, built on [bleak](https://github.com/hbldh/bleak):
 import asyncio
 from miramode import Outlet, Shower
 
+
 async def run_a_bath():
     async with Shower("1FE6A4BD-73A5-055E-6463-F4785E21D49D") as shower:
         for preset in await shower.presets():
             print(preset.index, preset.name)
 
-        await shower.run_preset(2)          # start the bath filling
+        await shower.run_preset(2)  # start the bath filling
         await asyncio.sleep(300)
         await shower.stop()
 
         # or drive an outlet directly
         await shower.set_outlets(Outlet.FIRST, temperature=39.0)
+
 
 asyncio.run(run_a_bath())
 ```
