@@ -1,5 +1,5 @@
 [project]
-name = "mira-mode-control"
+name = "miramode"
 version = "1.0.0"
 description = "Control Mira Mode digital showers and bath fillers over Bluetooth LE"
 readme = "README.md"

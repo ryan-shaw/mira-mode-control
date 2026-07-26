@@ -43,14 +43,23 @@ actually has will do anything.
 ## Installation
 
 ```console
+pip install miramode
+```
+
+Or, with [uv](https://docs.astral.sh/uv/) — `uv tool install miramode`
+to get just the `miramode` command, or `uv add miramode` to use it as a
+library in a project.
+
+### From source
+
+```console
 git clone git@github.com:ryan-shaw/mira-mode-control.git
 cd mira-mode-control
 uv sync
 ```
 
-This uses [uv](https://docs.astral.sh/uv/), which puts a virtual
-environment in `.venv` and installs the versions pinned in `uv.lock`.
-Prefix commands with `uv run` to use it. Plain `pip install .` works too.
+That installs the versions pinned in `uv.lock` into `.venv`. Prefix the
+commands below with `uv run` to use it.
 
 ### Development
 
@@ -69,7 +78,7 @@ Use `uv run ruff format .` to apply formatting.
 Find your valve:
 
 ```console
-$ uv run miramode scan
+$ miramode scan
 1FE6A4BD-73A5-055E-6463-F4785E21D49D  Mira 004C Bathroom
 ```
 
@@ -84,7 +93,7 @@ the shower or fills the bath. Listing them only reads from the valve and
 runs no water:
 
 ```console
-$ uv run miramode presets -a <address>
+$ miramode presets -a <address>
   1  Default
   2  Default Bathfill
 ```
@@ -93,7 +102,7 @@ Factory-fitted presets are numbered from 1; slot 0 is not used. Start one
 by number:
 
 ```console
-uv run miramode start -a <address> 2
+miramode start -a <address> 2
 ```
 
 ### Outlets
@@ -101,7 +110,7 @@ uv run miramode start -a <address> 2
 To run an outlet directly, at a temperature you choose:
 
 ```console
-uv run miramode outlets -a <address> --first --temperature 39
+miramode outlets -a <address> --first --temperature 39
 ```
 
 Use `--second` for the second outlet, and both flags together to run both
@@ -114,7 +123,7 @@ Which physical fixture is "first" depends on how your unit is plumbed.
 To shut everything off, including a running preset:
 
 ```console
-uv run miramode stop -a <address>
+miramode stop -a <address>
 ```
 
 ### Troubleshooting
@@ -122,7 +131,7 @@ uv run miramode stop -a <address>
 `-v` logs every frame exchanged with the valve:
 
 ```console
-$ uv run miramode -v stop -a <address>
+$ miramode -v stop -a <address>
 Connected to 1FE6A4BD-73A5-055E-6463-F4785E21D49D
 Sending aa 55 00 ab 04 00 00 00 00 52
 Received channel=1 opcode=0x01 payload=01
