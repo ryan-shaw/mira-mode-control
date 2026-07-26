@@ -54,12 +54,15 @@ Prefix commands with `uv run` to use it. Plain `pip install .` works too.
 
 ### Development
 
-Linting and type checking, the same two commands CI runs:
+The same checks CI runs:
 
 ```console
 uv run ruff check .
+uv run ruff format --check .
 uv run ty check
 ```
+
+Use `uv run ruff format .` to apply formatting.
 
 ## Command line usage
 
