@@ -1,5 +1,7 @@
 # mira-mode-control
 
+[![Lint](https://github.com/ryan-shaw/mira-mode-control/actions/workflows/lint.yml/badge.svg)](https://github.com/ryan-shaw/mira-mode-control/actions/workflows/lint.yml)
+
 Control Mira Mode digital showers and bath fillers from Python, over
 Bluetooth Low Energy.
 
@@ -49,6 +51,15 @@ uv sync
 This uses [uv](https://docs.astral.sh/uv/), which puts a virtual
 environment in `.venv` and installs the versions pinned in `uv.lock`.
 Prefix commands with `uv run` to use it. Plain `pip install .` works too.
+
+### Development
+
+Linting and type checking, the same two commands CI runs:
+
+```console
+uv run ruff check .
+uv run ty check
+```
 
 ## Command line usage
 
