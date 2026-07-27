@@ -207,6 +207,14 @@ Sending aa 55 00 ab 04 00 00 00 00 52
 Received channel=1 opcode=0x01 payload=01
 ```
 
+## A physical button
+
+`firmware/xiao-button` is firmware for a Seeed Studio XIAO ESP32C3 that
+starts a preset when a button is pressed, and sleeps in between so it
+runs from a small battery. Starting a preset is a single constant seven
+byte write, so the board needs none of this library — see that
+directory's README for wiring and caveats.
+
 ## Library usage
 
 The API is async, built on [bleak](https://github.com/hbldh/bleak):
