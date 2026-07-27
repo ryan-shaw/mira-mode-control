@@ -66,12 +66,20 @@ commands below with `uv run` to use it.
 The same checks CI runs:
 
 ```console
+uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
 ```
 
 Use `uv run ruff format .` to apply formatting.
+
+The tests need no valve. They run against replies recorded from real
+hardware, kept in `tests/captures.py` with a note on where each came
+from, and against a stand-in valve that answers written frames. The
+sharpest of them re-encodes a preset read off a real valve and requires
+the bytes to come back identical, which checks the encoding against the
+device's own representation rather than against our reading of it.
 
 ## Command line usage
 

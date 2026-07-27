@@ -41,6 +41,8 @@ miramode = "miramode.cli:main"
 
 [dependency-groups]
 dev = [
+    "pytest",
+    "pytest-asyncio",
     "ruff",
     "ty",
 ]
@@ -51,6 +53,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["miramode"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Every test here is either sync or a plain coroutine, so let pytest-asyncio
+# pick them up without decorating each one.
+asyncio_mode = "auto"
+filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 79
