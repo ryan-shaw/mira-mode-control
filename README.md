@@ -37,8 +37,11 @@ actually has will do anything.
 - A Bluetooth Low Energy adapter
 - On Linux, BlueZ
 - The valve must be paired with the host first, through your operating
-  system's Bluetooth settings. The valve refuses to accept commands over
-  an unbonded connection.
+  system's Bluetooth settings. It refuses commands over an unbonded
+  connection, and only accepts a new bond while it is in pairing mode:
+  press and hold the button on the front of the controller for five
+  seconds until it flashes, or on a dial model use Menu, `Settings`,
+  `Connect`. It holds up to ten paired devices at once.
 
 ## Installation
 
